@@ -92,6 +92,8 @@ public class ProcessVisitor extends AbstractVisitor {
     private static final String INIT_NODES_METHOD_NAME = "initNodes";
     private static final String INIT_CONNECTIONS_METHOD_NAME = "initConnections";
 
+    private static final int NODE_CHUNK_STATEMENT_THRESHOLD = 1500;
+
     private NodeVisitorBuilderService nodeVisitorService;
 
     private ReturnValueEvaluatorBuilderService returnValueEvaluatorBuilderService;
@@ -104,11 +106,6 @@ public class ProcessVisitor extends AbstractVisitor {
     public void visitProcess(WorkflowProcess process, ClassOrInterfaceDeclaration processClazz, MethodDeclaration processMethod, ProcessMetaData metadata) {
         ClassOrInterfaceType processFactoryType = new ClassOrInterfaceType(null, RuleFlowProcessFactory.class.getSimpleName());
 
-        // process() itself stays a fixed, small dispatcher: create the factory, delegate each phase to its
-        // own method, validate and return. This keeps process()'s own bytecode size independent of how large
-        // any individual process is - the phase methods below are where that size actually lands, and a phase
-        // that's still too large on its own (typically initNodes()) is handled by chunking within that phase,
-        // not by growing this method.
         BlockStmt processBody = new BlockStmt();
         processMethod.setBody(processBody);
 
@@ -139,7 +136,7 @@ public class ProcessVisitor extends AbstractVisitor {
         visitInterfaces(process.getNodes());
 
         metadata.setDynamic(((org.jbpm.workflow.core.WorkflowProcess) process).isDynamic());
-        // the process itself, plus metadata/collaboration/compensation/header
+        // the process itself
         BlockStmt metadataBody = new BlockStmt();
         metadataBody.addStatement(getFactoryMethod(FACTORY_FIELD_NAME, METHOD_NAME, new StringLiteralExpr(process.getName())))
                 .addStatement(getFactoryMethod(FACTORY_FIELD_NAME, METHOD_PACKAGE_NAME, new StringLiteralExpr(process.getPackageName())))
@@ -159,21 +156,20 @@ public class ProcessVisitor extends AbstractVisitor {
         visitCompensationScope(process, metadataBody);
         visitHeader(process, metadataBody);
 
-        BlockStmt nodesBody = new BlockStmt();
         List<Node> processNodes = new ArrayList<>();
         for (org.kie.api.definition.process.Node procNode : process.getNodes()) {
             processNodes.add((Node) procNode);
         }
-        visitNodes(processNodes, nodesBody, variableScope, metadata);
+        List<BlockStmt> nodeChunks = visitNodes(processNodes, variableScope, metadata);
 
-        // exception scope + connections
+        //exception scope
         BlockStmt connectionsBody = new BlockStmt();
         visitExceptionScope(process, connectionsBody);
         visitConnections(process.getNodes(), connectionsBody);
 
         addPhaseMethod(processClazz, processFactoryType, INIT_VARIABLES_METHOD_NAME, variablesBody);
         addPhaseMethod(processClazz, processFactoryType, INIT_METADATA_METHOD_NAME, metadataBody);
-        addPhaseMethod(processClazz, processFactoryType, INIT_NODES_METHOD_NAME, nodesBody);
+        emitInitNodes(processClazz, processFactoryType, nodeChunks);
         addPhaseMethod(processClazz, processFactoryType, INIT_CONNECTIONS_METHOD_NAME, connectionsBody);
 
         processBody.addStatement(phaseMethodCallStatement(INIT_VARIABLES_METHOD_NAME));
@@ -187,12 +183,6 @@ public class ProcessVisitor extends AbstractVisitor {
         processBody.addStatement(new ReturnStmt(getProcessMethod));
     }
 
-    /**
-     * Adds a {@code private static void <name>(RuleFlowProcessFactory factory)} method to {@code processClazz}
-     * with the given body. {@code factory} is the only piece of generated-code state any phase needs: nodes
-     * reference each other by string id (via {@code WorkflowElementIdentifierFactory}), never by Java local
-     * variable, so no phase needs anything another phase declared.
-     */
     private void addPhaseMethod(ClassOrInterfaceDeclaration processClazz, ClassOrInterfaceType processFactoryType, String name, BlockStmt body) {
         MethodDeclaration method = processClazz.addMethod(name, Modifier.Keyword.PRIVATE, Modifier.Keyword.STATIC);
         method.addParameter(new Parameter(processFactoryType, FACTORY_FIELD_NAME));
@@ -203,6 +193,23 @@ public class ProcessVisitor extends AbstractVisitor {
         MethodCallExpr call = new MethodCallExpr(null, name);
         call.addArgument(new NameExpr(FACTORY_FIELD_NAME));
         return call;
+    }
+
+    private void emitInitNodes(ClassOrInterfaceDeclaration processClazz, ClassOrInterfaceType processFactoryType, List<BlockStmt> nodeChunks) {
+        if (nodeChunks.size() == 1) {
+            addPhaseMethod(processClazz, processFactoryType, INIT_NODES_METHOD_NAME, nodeChunks.get(0));
+            return;
+        }
+
+        BlockStmt dispatcherBody = new BlockStmt();
+        for (int i = 0; i < nodeChunks.size(); i++) {
+            String chunkMethodName = INIT_NODES_METHOD_NAME + "_" + i;
+            addPhaseMethod(processClazz, processFactoryType, chunkMethodName, nodeChunks.get(i));
+            dispatcherBody.addStatement(phaseMethodCallStatement(chunkMethodName));
+        }
+        MethodDeclaration dispatcher = processClazz.addMethod(INIT_NODES_METHOD_NAME, Modifier.Keyword.PRIVATE, Modifier.Keyword.STATIC);
+        dispatcher.addParameter(new Parameter(processFactoryType, FACTORY_FIELD_NAME));
+        dispatcher.setBody(dispatcherBody);
     }
 
     private void visitCollaboration(WorkflowProcess process, BlockStmt body) {
@@ -268,15 +275,28 @@ public class ProcessVisitor extends AbstractVisitor {
         }
     }
 
-    private <U extends org.kie.api.definition.process.Node> void visitNodes(List<U> nodes, BlockStmt body, VariableScope variableScope, ProcessMetaData metadata) {
+    private <U extends org.kie.api.definition.process.Node> List<BlockStmt> visitNodes(List<U> nodes, VariableScope variableScope, ProcessMetaData metadata) {
+        List<BlockStmt> chunks = new ArrayList<>();
+        BlockStmt currentChunk = new BlockStmt();
+        chunks.add(currentChunk);
+
         for (U node : nodes) {
             @SuppressWarnings("unchecked")
             AbstractNodeVisitor<U> visitor = (AbstractNodeVisitor<U>) this.nodeVisitorService.findNodeVisitor(node.getClass());
             if (visitor == null) {
                 throw new IllegalStateException("No visitor found for node " + node.getClass().getName());
             }
-            visitor.visitNodeEntryPoint(null, node, body, variableScope, metadata);
+            visitor.visitNodeEntryPoint(null, node, currentChunk, variableScope, metadata);
+
+            if (currentChunk.getStatements().size() >= NODE_CHUNK_STATEMENT_THRESHOLD) {
+                currentChunk = new BlockStmt();
+                chunks.add(currentChunk);
+            }
         }
+        if (chunks.size() > 1 && chunks.get(chunks.size() - 1).getStatements().isEmpty()) {
+            chunks.remove(chunks.size() - 1);
+        }
+        return chunks;
     }
 
     @SuppressWarnings("unchecked")

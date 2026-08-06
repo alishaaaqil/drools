@@ -38,15 +38,8 @@ import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Drives the two BPMN files from apache/incubator-kie-issues#2229's minimal reproducer (754 sequential
- * script tasks, and the 753-task negative control one below the JVM's 64KB per-method threshold) through
- * the real production entry point - {@link ProcessCodegen#parseProcessFile(org.drools.io.Resource)}, i.e.
- * actual BPMN2 XML parsing via {@code XmlProcessReader}, not a hand-built process - then compiles the
- * generated class with the real {@code javac} compiler.
- * <p>
- * Complements {@link ProcessGeneratorCodeSizeTest}, which covers the same threshold but builds the process
- * programmatically via {@link org.jbpm.ruleflow.core.RuleFlowProcessFactory} and so never exercises XML
- * parsing. Together they cover both entry points production code actually uses.
+ * Regression test for apache/incubator-kie-issues#2229, driving the two BPMN files from the minimal
+ * reproducer through the real {@link ProcessCodegen#parseProcessFile(org.drools.io.Resource)} entry point.
  */
 public class ProcessCodeTooLargeReproducerTest {
 
@@ -68,9 +61,12 @@ public class ProcessCodeTooLargeReproducerTest {
 
         ProcessMetaData metadata = ProcessToExecModelGenerator.INSTANCE.generate(process);
         CompilationUnit generatedClassModel = metadata.getGeneratedClassModel();
-        String className = generatedClassModel.findFirst(ClassOrInterfaceDeclaration.class)
-                .orElseThrow()
-                .getNameAsString();
+        ClassOrInterfaceDeclaration clazz = generatedClassModel.findFirst(ClassOrInterfaceDeclaration.class).orElseThrow();
+        String className = clazz.getNameAsString();
+
+        assertThat(clazz.getMethodsByName("initNodes_0"))
+                .as("both reproducer files are large enough that initNodes() chunking must have fired")
+                .isNotEmpty();
 
         File sourceFile = writeToDefaultPackageSourceFile(tempDir, className, generatedClassModel.toString());
         String javacOutput = compileWithJavac(sourceFile, tempDir);

@@ -38,17 +38,8 @@ import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Regression test for the "code too large" failure (apache/incubator-kie-issues#2229, third bullet):
- * a single BPMN process with enough nodes generates a {@code process()} method whose bytecode exceeds
- * the JVM's 64KB per-method limit.
- * <p>
- * 754 sequential trivial script tasks is the exact, previously verified threshold at which the old
- * single-method {@code process()} overflowed 64KB of bytecode (753 tasks compiled clean). This drives
- * {@link ProcessToExecModelGenerator} - the class whose output {@link ProcessGenerator} later transplants
- * verbatim into the customer-facing wrapper, see {@link ProcessGeneratorTest} for that transplant - and
- * compiles the result with the real {@code javac} compiler, the same bytecode emitter production
- * compilation goes through, to confirm the phase-split in {@code ProcessVisitor} actually keeps every
- * generated method under the limit rather than just moving the failure around.
+ * Regression test for apache/incubator-kie-issues#2229: a process with enough sequential nodes must not
+ * generate a {@code process()} method whose bytecode exceeds the JVM's 64KB per-method limit.
  */
 public class ProcessGeneratorCodeSizeTest {
 
@@ -93,8 +84,6 @@ public class ProcessGeneratorCodeSizeTest {
     }
 
     private File writeToDefaultPackageSourceFile(Path tempDir, String className, String source) throws IOException {
-        // compiled standalone in the default package, deliberately independent of the source's own
-        // package declaration, so this test needs nothing beyond the generated file itself
         String withoutPackageDeclaration = source.replaceFirst("(?m)^package .*;\\n", "");
         File sourceFile = tempDir.resolve(className + ".java").toFile();
         try (FileWriter writer = new FileWriter(sourceFile)) {

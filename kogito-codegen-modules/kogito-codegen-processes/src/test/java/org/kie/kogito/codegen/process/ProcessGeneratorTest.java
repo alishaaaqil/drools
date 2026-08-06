@@ -36,11 +36,6 @@ import com.github.javaparser.ast.body.MethodDeclaration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * Covers {@link ProcessGenerator#classDeclaration()}'s handling of the {@code CompilationUnit}
- * produced by {@link org.jbpm.compiler.canonical.ProcessVisitor}, in particular that every method it
- * generates is transplanted onto the resulting wrapper class - not just the first one JavaParser finds.
- */
 public class ProcessGeneratorTest {
 
     private static final String TEST_PROCESS_FILE = "src/test/resources/startsignal/StartSignalEventNoPayload.bpmn2";
@@ -57,11 +52,6 @@ public class ProcessGeneratorTest {
 
     @Test
     void classDeclarationTransplantsEveryGeneratedMethodNotJustTheFirst() {
-        // ProcessVisitor splits process() into phase methods (initVariables/initMetadata/initNodes/
-        // initConnections) to keep any single method's bytecode under the JVM's per-method size limit.
-        // Before this fix, ProcessGenerator located the class's methods with an unfiltered
-        // findFirst(MethodDeclaration.class) and silently dropped every method but that one - this
-        // asserts all five survive the transplant onto the wrapper class.
         ClassOrInterfaceDeclaration cls = generateClassDeclaration(buildExecModelGenerator());
 
         assertThat(cls.getMethodsByName("process")).hasSize(1);
@@ -69,6 +59,14 @@ public class ProcessGeneratorTest {
         assertThat(cls.getMethodsByName("initMetadata")).hasSize(1);
         assertThat(cls.getMethodsByName("initNodes")).hasSize(1);
         assertThat(cls.getMethodsByName("initConnections")).hasSize(1);
+    }
+
+    @Test
+    void classDeclarationDoesNotChunkNodesForASmallProcess() {
+        ClassOrInterfaceDeclaration cls = generateClassDeclaration(buildExecModelGenerator());
+
+        assertThat(cls.getMethodsByName("initNodes")).hasSize(1);
+        assertThat(cls.getMethodsByName("initNodes_0")).isEmpty();
     }
 
     private ClassOrInterfaceDeclaration generateClassDeclaration(ProcessExecutableModelGenerator execModelGen) {
